@@ -1,0 +1,6 @@
+{
+  "name": "BizAssist AI",
+  "description": "Corporate productivity assistant featuring meeting summaries, email drafting, document Q&A, and a prompt library, powered by Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
