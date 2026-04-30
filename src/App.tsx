@@ -18,18 +18,24 @@ import {
   Users,
   Target,
   Zap,
-  User,
+  User as UserIcon,
   Sparkles,
   HelpCircle,
   MessageSquare,
   Video,
-  Newspaper
+  Newspaper,
+  LogOut,
+  Settings
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
+import { auth, db, googleProvider } from './firebase';
+import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import type { User } from 'firebase/auth';
+import { doc, setDoc, getDoc, collection, addDoc, getDocs } from 'firebase/firestore';
 
 // Initialize Gemini
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// We only init the AI object if we have a key, we'll do this in the component or skip it since we use fetch directly for some calls.
 
 interface Prompt {
   id: string;
@@ -70,13 +76,16 @@ interface ActionItem {
 }
 
 export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
   const [activeTab, setActiveTab] = useState<Tab>('summariser');
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [tempKey, setTempKey] = useState('');
-  const [apiKey, setApiKey] = useState<string | null>(() => localStorage.getItem('geminiApiKey'));
+  const [apiKey, setApiKey] = useState<string | null>(null);
 
   // Meeting Summariser State
   const [meetingNotes, setMeetingNotes] = useState('');
@@ -111,20 +120,79 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState('All');
   
-  const [prompts, setPrompts] = useState<Prompt[]>(() => {
-    const saved = localStorage.getItem('customPrompts');
-    const customPrompts = saved ? JSON.parse(saved) : [];
-    return [...customPrompts, ...INITIAL_PROMPTS];
-  });
+  const [prompts, setPrompts] = useState<Prompt[]>(INITIAL_PROMPTS);
   
   const [selectedPrompt, setSelectedPrompt] = useState<Prompt | null>(null);
   const [placeholders, setPlaceholders] = useState<Record<string, string>>({});
   
   const [showCustomModal, setShowCustomModal] = useState(false);
   const [customPrompt, setCustomPrompt] = useState<Partial<Prompt>>({ department: 'HR' });
-  const [showGuide, setShowGuide] = useState(() => {
-    return localStorage.getItem('bizassist_guide_seen') !== 'true';
-  });
+  const [showGuide, setShowGuide] = useState(false);
+
+  const [signInError, setSignInError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setAuthLoading(true);
+      setUser(currentUser);
+      if (currentUser) {
+        try {
+          const userDoc = await getDoc(doc(db, "users", currentUser.uid));
+          if (userDoc.exists()) {
+            const data = userDoc.data();
+            setApiKey(data.geminiApiKey || null);
+            setShowGuide(!data.guideSeen); // if not true, show guide
+          } else {
+            setShowGuide(true);
+          }
+
+          // Fetch custom prompts
+          const promptsRef = collection(db, "users", currentUser.uid, "prompts");
+          const promptsSnap = await getDocs(promptsRef);
+          const customPrompts: Prompt[] = [];
+          promptsSnap.forEach(d => {
+            customPrompts.push({ id: d.id, ...d.data() } as Prompt);
+          });
+          setPrompts([...customPrompts, ...INITIAL_PROMPTS]);
+
+        } catch (err) {
+          console.error("Failed to load user data:", err);
+        }
+      } else {
+        setApiKey(null);
+        setPrompts(INITIAL_PROMPTS);
+      }
+      setAuthLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  const handleSignIn = async () => {
+    setSignInError(null);
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err: any) {
+      console.error("Sign-in failed:", err);
+      if (err.code === 'auth/unauthorized-domain') {
+        setSignInError("Your domain is not authorized. Please add it to your Firebase Console under Authentication > Settings > Authorized domains.");
+      } else if (err.code === 'auth/popup-blocked') {
+        setSignInError("Sign-in popup blocked by the browser. Please allow popups or open this app in a new tab (using the button in the top right of this preview).");
+      } else if (err.code === 'auth/cancelled-popup-request' || err.code === 'auth/popup-closed-by-user') {
+        setSignInError("Sign-in popup was closed before completing. Please try again, or open the app in a new tab if it fails to open.");
+      } else {
+        setSignInError(err.message || "Failed to sign in");
+      }
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error("Sign-out failed:", err);
+    }
+  };
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -144,12 +212,16 @@ export default function App() {
     }, 3000);
   };
 
-  const saveApiKey = () => {
-    if (tempKey.trim()) {
-      localStorage.setItem('geminiApiKey', tempKey.trim());
-      setApiKey(tempKey.trim());
-      setShowKeyModal(false);
-      setTempKey('');
+  const saveApiKey = async () => {
+    if (tempKey.trim() && user) {
+      try {
+        await setDoc(doc(db, "users", user.uid), { geminiApiKey: tempKey.trim() }, { merge: true });
+        setApiKey(tempKey.trim());
+        setShowKeyModal(false);
+        setTempKey('');
+      } catch (err) {
+        console.error("Failed to save API key", err);
+      }
     }
   };
 
@@ -223,6 +295,20 @@ export default function App() {
       setTimeout(() => {
         outputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 100);
+
+      // Save summary history if user is logged in
+      if (user) {
+        try {
+          await addDoc(collection(db, "users", user.uid, "summaries"), {
+            mode: summaryMode,
+            notesPrompt: meetingNotes.substring(0, 100) + '...',
+            summaryOutput: resultText,
+            timestamp: new Date().toISOString()
+          });
+        } catch (e) {
+          console.error("Failed to save summary history", e);
+        }
+      }
 
     } catch (err) {
       console.error(err);
@@ -476,8 +562,8 @@ Sign off appropriately for the chosen tone.`;
     return text;
   };
 
-  const handleSaveCustomPrompt = () => {
-    if (!customPrompt.name || !customPrompt.promptTemplate) return;
+  const handleSaveCustomPrompt = async () => {
+    if (!customPrompt.name || !customPrompt.promptTemplate || !user) return;
     const newPrompt: Prompt = {
       id: Date.now().toString(),
       name: customPrompt.name!,
@@ -488,14 +574,17 @@ Sign off appropriately for the chosen tone.`;
       category: customPrompt.department || 'Other',
       isCustom: true
     };
-    const updated = [newPrompt, ...prompts];
-    setPrompts(updated);
-    
-    const savedCustoms = updated.filter(p => p.isCustom);
-    localStorage.setItem('customPrompts', JSON.stringify(savedCustoms));
-    
-    setShowCustomModal(false);
-    setCustomPrompt({ department: 'HR' });
+
+    try {
+      await setDoc(doc(db, "users", user.uid, "prompts", newPrompt.id), newPrompt);
+      const updated = [newPrompt, ...prompts];
+      setPrompts(updated);
+      
+      setShowCustomModal(false);
+      setCustomPrompt({ department: 'HR' });
+    } catch (err) {
+      console.error("Failed to save custom prompt", err);
+    }
   };
 
   const handleExportLibrary = () => {
@@ -513,18 +602,23 @@ Sign off appropriately for the chosen tone.`;
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const imported = JSON.parse(event.target?.result as string);
         if (Array.isArray(imported)) {
            // Basic validation
            const validImports = imported.filter(p => p.id && p.name && p.promptTemplate);
-           const merged = [...validImports.map(p => ({...p, isCustom: true})), ...prompts];
+           const importedCustoms = validImports.map(p => ({...p, isCustom: true}));
+           const merged = [...importedCustoms, ...prompts];
            // Deduplicate by ID just in case
            const unique = Array.from(new Map(merged.map(item => [item.id, item])).values());
            setPrompts(unique);
-           const savedCustoms = unique.filter(p => p.isCustom);
-           localStorage.setItem('customPrompts', JSON.stringify(savedCustoms));
+           
+           if (user) {
+             for (const p of importedCustoms) {
+               await setDoc(doc(db, "users", user.uid, "prompts", p.id), p);
+             }
+           }
         }
       } catch (err) {
         console.error("Failed to parse JSON", err);
@@ -533,6 +627,56 @@ Sign off appropriately for the chosen tone.`;
     reader.readAsText(file);
     e.target.value = '';
   };
+
+  const markGuideSeen = async () => {
+    setShowGuide(false);
+    if (user) {
+      try {
+        await setDoc(doc(db, "users", user.uid), { guideSeen: true }, { merge: true });
+      } catch (err) {
+        console.error("Failed to save guide seen", err);
+      }
+    }
+  };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center font-sans bg-gray-50">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+          <p className="text-gray-500 font-medium">Loading BizAssist AI...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center font-sans bg-gray-50 p-4">
+        <div className="bg-white max-w-md w-full p-8 rounded-3xl shadow-xl border border-gray-100 flex flex-col items-center text-center">
+          <div className="w-16 h-16 bg-primary rounded-2xl flex items-center justify-center text-white shadow-lg mb-6">
+            <Zap size={32} fill="currentColor" />
+          </div>
+          <h1 className="text-2xl font-bold text-dark-accent mb-2">Welcome to BizAssist AI</h1>
+          <p className="text-gray-500 mb-8">Sign in to access your AI corporate assistant and prompt library.</p>
+          
+          {signInError && (
+            <div className="w-full bg-red-50 text-red-600 p-4 rounded-xl text-sm mb-6 border border-red-100 text-left">
+              <strong>Sign In Error:</strong> {signInError}
+            </div>
+          )}
+
+          <button 
+            onClick={handleSignIn}
+            className="w-full bg-primary text-white py-4 rounded-xl font-bold hover:bg-opacity-90 transition-all shadow-md flex items-center justify-center gap-2"
+          >
+            <UserIcon size={20} />
+            Sign in with Google
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col font-sans">
@@ -555,13 +699,31 @@ Sign off appropriately for the chosen tone.`;
             <span className="text-red-500 font-bold">i</span>
           </div>
         </div>
-        <button 
-          onClick={() => setShowGuide(true)}
-          className="text-gray-500 hover:text-primary transition-colors p-2 bg-gray-50 rounded-full border border-gray-200"
-          title="User Guide"
-        >
-          <HelpCircle size={18} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={() => setShowGuide(true)}
+            className="text-gray-500 hover:text-primary transition-colors p-2 bg-gray-50 rounded-full border border-gray-200"
+            title="User Guide"
+          >
+            <HelpCircle size={18} />
+          </button>
+          
+          <button 
+            onClick={() => setShowKeyModal(true)}
+            className="text-gray-500 hover:text-primary transition-colors p-2 bg-gray-50 rounded-full border border-gray-200"
+            title="Settings"
+          >
+            <Settings size={18} />
+          </button>
+
+          <button 
+            onClick={handleSignOut}
+            className="text-gray-500 hover:text-red-500 transition-colors p-2 bg-gray-50 rounded-full border border-gray-200"
+            title="Sign Out"
+          >
+            <LogOut size={18} />
+          </button>
+        </div>
       </nav>
 
       {/* 2. TAB NAVIGATION */}
@@ -1114,7 +1276,7 @@ Sign off appropriately for the chosen tone.`;
                             >
                               <div className="p-4 bg-gray-50 border-b border-gray-100 flex items-start gap-4">
                                 <div className="mt-1 flex-shrink-0 w-6 h-6 bg-gray-200 rounded-full flex items-center justify-center text-gray-500">
-                                   <User size={12} />
+                                   <UserIcon size={12} />
                                 </div>
                                 <h4 className="text-sm font-medium text-gray-600 leading-relaxed">{turn.q}</h4>
                               </div>
@@ -1501,8 +1663,7 @@ Sign off appropriately for the chosen tone.`;
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => {
-                 setShowGuide(false);
-                 localStorage.setItem('bizassist_guide_seen', 'true');
+                 markGuideSeen();
               }}
               className="absolute inset-0 bg-dark-accent/60 backdrop-blur-sm"
             />
@@ -1552,8 +1713,7 @@ Sign off appropriately for the chosen tone.`;
                <div className="mt-8 pt-6 border-t border-gray-100 flex justify-end">
                  <button 
                    onClick={() => {
-                      setShowGuide(false);
-                      localStorage.setItem('bizassist_guide_seen', 'true');
+                      markGuideSeen();
                    }}
                    className="px-8 py-3 bg-primary text-white text-sm font-bold rounded-xl shadow-md hover:bg-opacity-90 transition-all"
                  >
