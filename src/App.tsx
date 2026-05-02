@@ -244,7 +244,7 @@ export default function App() {
     const startTime = Date.now();
     let isSuccess = false;
     let errMsg: string | null = null;
-    const modelUsed = 'gemini-2.0-flash';
+    const modelUsed = 'gemini-3-flash-preview';
     let fullPromptLength = 0;
     let responseTextLength = 0;
 
@@ -252,27 +252,17 @@ export default function App() {
       const fullPrompt = `${SYSTEM_PROMPT}\n\nMODE: ${summaryMode}\n\nMEETING NOTES:\n${meetingNotes}`;
       fullPromptLength = fullPrompt.length;
       
-      // Use the specific URL requested by the user
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelUsed}:generateContent?key=${apiKey}`;
-      
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: fullPrompt }] }]
-        })
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: modelUsed,
+        contents: fullPrompt,
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error?.message || `API request failed with status ${response.status}`);
-      }
       
-      const data = await response.json();
-      if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
+      const resultText = response.text;
+      if (!resultText) {
         throw new Error('AI returned an empty or invalid response');
       }
-      const resultText = data.candidates[0].content.parts[0].text;
+      
       responseTextLength = resultText.length;
       isSuccess = true;
       
@@ -281,17 +271,14 @@ export default function App() {
       // Extract Action Items structured data if mode is Action Items or Full Report
       if (summaryMode !== 'Summary Only') {
         const structuralPrompt = `Extract action items from these notes as a JSON array of objects with keys: task, owner, deadline (use TBD if unknown), isUrgent (boolean). Only return the JSON.\n\nNOTES:\n${meetingNotes}`;
-        const structResponse = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: structuralPrompt }] }]
-          })
-        });
         
-        if (structResponse.ok) {
-          const structData = await structResponse.json();
-          const jsonStr = structData.candidates?.[0]?.content?.parts?.[0]?.text?.replace(/```json|```/g, '').trim();
+        try {
+          const structResponse = await ai.models.generateContent({
+            model: modelUsed,
+            contents: structuralPrompt,
+          });
+          
+          const jsonStr = structResponse.text?.replace(/```json|```/g, '').trim();
           if (jsonStr) {
             try {
               const parsed = JSON.parse(jsonStr);
@@ -300,6 +287,8 @@ export default function App() {
               console.error("Failed to parse action items JSON", e);
             }
           }
+        } catch (stErr) {
+          console.error("Failed to extract structural data", stErr);
         }
       }
 
@@ -385,7 +374,7 @@ export default function App() {
     const startTime = Date.now();
     let isSuccess = false;
     let errMsg: string | null = null;
-    const modelUsed = 'gemini-2.0-flash';
+    const modelUsed = 'gemini-3-flash-preview';
     let fullPromptLength = 0;
     let responseTextLength = 0;
     const selectedTone = EMAIL_TONES.find(t => t.id === emailTone);
@@ -400,27 +389,20 @@ Sign off appropriately for the chosen tone.`;
       const fullPrompt = `${systemPrompt}\n\nTONE: ${selectedTone?.label} — ${selectedTone?.desc}\nRECIPIENT: ${emailRecipient || 'colleague'}\nCONTEXT: ${emailContext || 'None provided'}\nTASK: ${emailDescription}\nWrite a complete professional email.${modifier ? `\n\n${modifier}` : ''}`;
       fullPromptLength = fullPrompt.length;
       
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelUsed}:generateContent?key=${apiKey}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: fullPrompt }] }],
-          generationConfig: { temperature: 0.6 }
-        })
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: modelUsed,
+        contents: fullPrompt,
+        config: {
+          temperature: 0.6,
+        }
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error?.message || `API request failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (!data.candidates?.[0]?.content?.parts?.[0]?.text) {
+      let resultText = response.text;
+      if (!resultText) {
         throw new Error('AI returned an empty or invalid response');
       }
       
-      let resultText = data.candidates[0].content.parts[0].text;
       responseTextLength = resultText.length;
       isSuccess = true;
       
@@ -516,7 +498,7 @@ Sign off appropriately for the chosen tone.`;
     const startTime = Date.now();
     let isSuccess = false;
     let errMsg: string | null = null;
-    const modelUsed = 'gemini-2.0-flash';
+    const modelUsed = 'gemini-3-flash-preview';
     let fullPromptLength = 0;
     let responseTextLength = 0;
 
@@ -551,20 +533,13 @@ Sign off appropriately for the chosen tone.`;
 
       fullPromptLength = JSON.stringify(requestContents).length;
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelUsed}:generateContent?key=${apiKey}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: requestContents })
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: modelUsed,
+        contents: requestContents,
       });
 
-      if (!response.ok) {
-        const err = await response.json().catch(()=>({}));
-        throw new Error(err.error?.message || 'API Request Failed');
-      }
-
-      const data = await response.json();
-      const answer = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No answer found.';
+      const answer = response.text || 'No answer found.';
       
       responseTextLength = answer.length;
       isSuccess = true;
