@@ -25,14 +25,16 @@ import {
   Video,
   Newspaper,
   LogOut,
-  Settings
+  Settings,
+  Activity
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
 import { auth, db, googleProvider } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 import type { User } from 'firebase/auth';
-import { doc, setDoc, getDoc, collection, addDoc, getDocs } from 'firebase/firestore';
+import { doc, setDoc, getDoc, collection, addDoc, getDocs, serverTimestamp } from 'firebase/firestore';
+import { StatsDashboard } from './StatsDashboard';
 
 // Initialize Gemini
 // We only init the AI object if we have a key, we'll do this in the component or skip it since we use fetch directly for some calls.
@@ -66,7 +68,7 @@ Rules: Be concise. Use clear headings. Extract owner names from context. Flag an
 
 const SAMPLE_NOTES_PLACEHOLDER = "Example: Sales team sync — 14 Jan 2026. Present: Ahmed, Priya, James. Q1 pipeline discussed. Ahmed to follow up with TechCorp by Friday. Priya presented deck — approved for client send. James flagged delay on proposal — needs legal review first...";
 
-type Tab = 'summariser' | 'email' | 'qa' | 'library';
+type Tab = 'summariser' | 'email' | 'qa' | 'library' | 'stats';
 
 interface ActionItem {
   task: string;
@@ -239,11 +241,19 @@ export default function App() {
     setSummaryOutput('');
     setActionItems([]);
 
+    const startTime = Date.now();
+    let isSuccess = false;
+    let errMsg: string | null = null;
+    const modelUsed = 'gemini-2.0-flash';
+    let fullPromptLength = 0;
+    let responseTextLength = 0;
+
     try {
       const fullPrompt = `${SYSTEM_PROMPT}\n\nMODE: ${summaryMode}\n\nMEETING NOTES:\n${meetingNotes}`;
+      fullPromptLength = fullPrompt.length;
       
       // Use the specific URL requested by the user
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelUsed}:generateContent?key=${apiKey}`;
       
       const response = await fetch(url, {
         method: 'POST',
@@ -263,6 +273,8 @@ export default function App() {
         throw new Error('AI returned an empty or invalid response');
       }
       const resultText = data.candidates[0].content.parts[0].text;
+      responseTextLength = resultText.length;
+      isSuccess = true;
       
       setSummaryOutput(resultText);
 
@@ -312,9 +324,21 @@ export default function App() {
 
     } catch (err) {
       console.error(err);
-      setError(err instanceof Error ? err.message : "Could not reach AI. Check your API key or internet connection.");
+      errMsg = err instanceof Error ? err.message : "Could not reach AI. Check your API key or internet connection.";
+      setError(errMsg);
     } finally {
       setLoading(false);
+      logAiEvent({
+        feature: 'meeting_summariser',
+        subMode: summaryMode,
+        model: modelUsed,
+        promptTokens: Math.ceil(fullPromptLength / 4),
+        responseTokens: Math.ceil(responseTextLength / 4),
+        latencyMs: Date.now() - startTime,
+        success: isSuccess,
+        errorMessage: errMsg,
+        inputLength: meetingNotes.length
+      });
     }
   };
 
@@ -358,8 +382,14 @@ export default function App() {
     if (!emailDescription || !apiKey) return;
     setLoading(true);
     setError(null);
+    const startTime = Date.now();
+    let isSuccess = false;
+    let errMsg: string | null = null;
+    const modelUsed = 'gemini-2.0-flash';
+    let fullPromptLength = 0;
+    let responseTextLength = 0;
+    const selectedTone = EMAIL_TONES.find(t => t.id === emailTone);
     try {
-      const selectedTone = EMAIL_TONES.find(t => t.id === emailTone);
       const systemPrompt = `You are an expert corporate communication specialist. You write clear, effective emails tailored to the specified tone.
 Rules: Always include a subject line labelled 'Subject:'.
 Write the full email body below. Match the tone exactly.
@@ -368,8 +398,9 @@ Never exceed 250 words unless the Detailed tone is selected.
 Sign off appropriately for the chosen tone.`;
       
       const fullPrompt = `${systemPrompt}\n\nTONE: ${selectedTone?.label} — ${selectedTone?.desc}\nRECIPIENT: ${emailRecipient || 'colleague'}\nCONTEXT: ${emailContext || 'None provided'}\nTASK: ${emailDescription}\nWrite a complete professional email.${modifier ? `\n\n${modifier}` : ''}`;
+      fullPromptLength = fullPrompt.length;
       
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelUsed}:generateContent?key=${apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -390,6 +421,8 @@ Sign off appropriately for the chosen tone.`;
       }
       
       let resultText = data.candidates[0].content.parts[0].text;
+      responseTextLength = resultText.length;
+      isSuccess = true;
       
       let subject = 'Email Draft';
       const subjectMatch = resultText.match(/Subject:\s*(.*)/i);
@@ -408,9 +441,21 @@ Sign off appropriately for the chosen tone.`;
       });
     } catch (err) {
       console.error(err);
-      setError(err instanceof Error ? err.message : 'Could not generate email draft.');
+      errMsg = err instanceof Error ? err.message : 'Could not generate email draft.';
+      setError(errMsg);
     } finally {
       setLoading(false);
+      logAiEvent({
+        feature: 'email_drafter',
+        subMode: selectedTone?.label || 'Professional',
+        model: modelUsed,
+        promptTokens: Math.ceil(fullPromptLength / 4),
+        responseTokens: Math.ceil(responseTextLength / 4),
+        latencyMs: Date.now() - startTime,
+        success: isSuccess,
+        errorMessage: errMsg,
+        inputLength: emailDescription.length
+      });
     }
   };
 
@@ -468,6 +513,13 @@ Sign off appropriately for the chosen tone.`;
     setLoading(true);
     setQaError(null);
 
+    const startTime = Date.now();
+    let isSuccess = false;
+    let errMsg: string | null = null;
+    const modelUsed = 'gemini-2.0-flash';
+    let fullPromptLength = 0;
+    let responseTextLength = 0;
+
     try {
       const systemPromptText = "You are a precise document analyst. Answer only from the document provided. If the answer is not in the document, say so clearly. Be concise.\nEnd every answer with: Source: [quote the exact sentence or figure from the document that supports your answer].";
       
@@ -497,7 +549,9 @@ Sign off appropriately for the chosen tone.`;
       
       requestContents.push({ role: 'user', parts: newTurnParts });
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+      fullPromptLength = JSON.stringify(requestContents).length;
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelUsed}:generateContent?key=${apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -511,14 +565,29 @@ Sign off appropriately for the chosen tone.`;
 
       const data = await response.json();
       const answer = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No answer found.';
+      
+      responseTextLength = answer.length;
+      isSuccess = true;
 
       setQaConversation([...qaConversation, { q: currentQ, a: answer }]);
       setQaQuestion('');
     } catch (e: any) {
        console.error(e);
-       setQaError(e.message || "Failed to analyze document");
+       errMsg = e.message || "Failed to analyze document";
+       setQaError(errMsg);
     } finally {
       setLoading(false);
+      logAiEvent({
+        feature: 'document_qa',
+        subMode: 'Chat',
+        model: modelUsed,
+        promptTokens: Math.ceil(fullPromptLength / 4),
+        responseTokens: Math.ceil(responseTextLength / 4),
+        latencyMs: Date.now() - startTime,
+        success: isSuccess,
+        errorMessage: errMsg,
+        inputLength: currentQ.length
+      });
     }
   };
 
@@ -639,6 +708,38 @@ Sign off appropriately for the chosen tone.`;
     }
   };
 
+  const logAiEvent = async (eventData: {
+    feature: string,
+    subMode: string,
+    model: string,
+    promptTokens: number,
+    responseTokens: number,
+    latencyMs: number,
+    success: boolean,
+    errorMessage: string | null,
+    inputLength: number
+  }) => {
+    if (!user) return;
+    try {
+      await addDoc(collection(db, "ai_events"), {
+        timestamp: serverTimestamp(),
+        userId: user.uid,
+        userEmail: user.email,
+        feature: eventData.feature,
+        subMode: eventData.subMode,
+        model: eventData.model,
+        promptTokens: eventData.promptTokens,
+        responseTokens: eventData.responseTokens,
+        latencyMs: eventData.latencyMs,
+        success: eventData.success,
+        errorMessage: eventData.errorMessage,
+        inputLength: eventData.inputLength
+      });
+    } catch (err) {
+      console.error("Failed to log AI event", err);
+    }
+  };
+
   if (authLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center font-sans bg-gray-50">
@@ -734,6 +835,7 @@ Sign off appropriately for the chosen tone.`;
             { id: 'email', label: 'Email Drafter', icon: <Mail size={16} />, emoji: '✉️' },
             { id: 'qa', label: 'Document Q&A', icon: <Search size={16} />, emoji: '🔍' },
             { id: 'library', label: 'Prompt Library', icon: <Bookmark size={16} />, emoji: '🔖' },
+            { id: 'stats', label: 'Stats', icon: <Activity size={16} />, emoji: '📊' },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -1428,6 +1530,11 @@ Sign off appropriately for the chosen tone.`;
                    </button>
                 </div>
               </motion.div>
+            )}
+
+            {/* 7. STATS TAB */}
+            {activeTab === 'stats' && (
+              <StatsDashboard user={user} />
             )}
           </AnimatePresence>
         </main>
