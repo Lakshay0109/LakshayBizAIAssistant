@@ -696,7 +696,7 @@ Sign off appropriately for the chosen tone.`;
   }) => {
     if (!user) return;
     try {
-      await addDoc(collection(db, "ai_events"), {
+      await addDoc(collection(db, "users", user.uid, "ai_events"), {
         timestamp: serverTimestamp(),
         userId: user.uid,
         userEmail: user.email,

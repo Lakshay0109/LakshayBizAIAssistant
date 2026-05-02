@@ -53,21 +53,19 @@ export function StatsDashboard({ user }: { user: User }) {
       }
 
       let constraints: any[] = [
-        where("userId", "==", user.uid),
         orderBy("timestamp", "desc"),
         limit(500)
       ];
 
       if (startTime) {
         constraints = [
-          where("userId", "==", user.uid),
           where("timestamp", ">=", startTime),
           orderBy("timestamp", "desc"),
           limit(500)
         ];
       }
 
-      let q = query(collection(db, "ai_events"), ...constraints);
+      let q = query(collection(db, "users", user.uid, "ai_events"), ...constraints);
       
       const snap = await getDocs(q);
       const fetched: AiEvent[] = [];
