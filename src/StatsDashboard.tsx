@@ -53,14 +53,12 @@ export function StatsDashboard({ user }: { user: User }) {
       }
 
       let constraints: any[] = [
-        orderBy("timestamp", "desc"),
         limit(500)
       ];
 
       if (startTime) {
         constraints = [
           where("timestamp", ">=", startTime),
-          orderBy("timestamp", "desc"),
           limit(500)
         ];
       }
@@ -72,10 +70,16 @@ export function StatsDashboard({ user }: { user: User }) {
       snap.forEach(doc => {
         fetched.push({ id: doc.id, ...doc.data() } as AiEvent);
       });
+      // Sort locally: reverse chronological
+      fetched.sort((a, b) => {
+        const timeA = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : 0;
+        const timeB = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : 0;
+        return timeB - timeA;
+      });
       setEvents(fetched);
     } catch (err) {
       console.error("Failed to fetch stats", err);
-      setError("Failed to load analytics data.");
+      setError("Failed to load analytics data: " + (err instanceof Error ? err.message : String(err)));
     } finally {
       setLoading(false);
     }
@@ -94,7 +98,7 @@ export function StatsDashboard({ user }: { user: User }) {
     );
   }
 
-  if (!loading && events.length === 0) {
+  if (!loading && events.length === 0 && !error) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-gray-500 bg-white rounded-3xl border border-gray-100 shadow-sm mx-auto max-w-2xl mt-12">
         <div className="w-16 h-16 bg-gray-50 rounded-2xl flex items-center justify-center mb-4">

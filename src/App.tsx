@@ -712,6 +712,7 @@ Sign off appropriately for the chosen tone.`;
       });
     } catch (err) {
       console.error("Failed to log AI event", err);
+      setError("Failed to save statistics: " + (err instanceof Error ? err.message : String(err)));
     }
   };
 
